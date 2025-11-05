@@ -1,0 +1,1 @@
+In this folder we will store the data collected by Archetype AI members focused on the USAA project (Driver's behavior analysis).
