@@ -10,6 +10,8 @@
 # Magnetometer → gives the geomagnetic vector (rough North).
 # From these two, we can compute three orthogonal axes for the rotation matrix.
 
+import numpy as np
+
 def compute_rotation_matrix(accel, magnet):
     """
     Compute rotation matrix from sensor frame to car frame.
