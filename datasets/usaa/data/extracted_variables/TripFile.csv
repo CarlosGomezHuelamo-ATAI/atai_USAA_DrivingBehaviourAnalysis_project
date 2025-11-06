@@ -1,0 +1,2 @@
+StartTimeZone,EndTimeZone,EndTime,TripID,CompanyID,DriverID,AccelerometerData,GPSData,MagnetometerData,StartTime,DataAlgorithmVersion,QuaternionData
+-700,-700,802.8447301387787,123456789abcdef123456789abcdef12,123abc12-1234-567a-123b-123abc12,abcd1234-012a-345b-678c-901234abcdef,List,List,List,0.0,0.12.3-4.56.7.890a1,List

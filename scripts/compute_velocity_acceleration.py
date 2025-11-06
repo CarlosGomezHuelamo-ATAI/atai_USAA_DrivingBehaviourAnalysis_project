@@ -1,9 +1,11 @@
+import pdb
 import os
 import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
+from pyproj import Transformer
 
 # ============================================================
 # ------------------ Quaternion math helpers -----------------
@@ -102,17 +104,113 @@ def smooth_signal(x, window=51, poly=3):
     return savgol_filter(x, window_length=window, polyorder=min(poly, 3))
 
 
+def compute_wgs84_derived_speed(df):
+    """
+    Compute speed from WGS84 GPS position data using numerical differentiation.
+
+    Method:
+    1. Convert WGS84 (lat, lon) to UTM coordinates (meters)
+    2. Compute velocity using Savitzky-Golay filter differentiation
+    3. Return speed magnitude in m/s
+
+    This provides an independent ground truth for comparison with GPS-reported speed.
+    """
+    if 'locationLatitude(WGS84)' not in df.columns or 'locationLongitude(WGS84)' not in df.columns:
+        print("⚠️  WGS84 coordinates not found, skipping derived speed calculation")
+        return None
+
+    # Remove rows with NaN coordinates and timestamps
+    valid_mask = ~(df['locationLatitude(WGS84)'].isna() |
+                   df['locationLongitude(WGS84)'].isna() |
+                   df['locationTimestamp_since1970(s)'].isna())
+
+    if valid_mask.sum() < 10:
+        print("⚠️  Insufficient valid GPS coordinates for speed derivation")
+        return None
+
+    df_valid = df[valid_mask].copy()
+
+    # Remove duplicate timestamps (keep first occurrence)
+    df_valid = df_valid.drop_duplicates(subset=['locationTimestamp_since1970(s)'], keep='first')
+
+    # Sort by timestamp
+    df_valid = df_valid.sort_values('locationTimestamp_since1970(s)').reset_index(drop=True)
+
+    if len(df_valid) < 10:
+        print("⚠️  Insufficient unique GPS samples for speed derivation")
+        return None
+
+    # Determine UTM zone from first coordinate
+    first_lon = df_valid['locationLongitude(WGS84)'].iloc[0]
+    first_lat = df_valid['locationLatitude(WGS84)'].iloc[0]
+    utm_zone = int((first_lon + 180) / 6) + 1
+    is_northern = first_lat >= 0
+
+    # Transform to UTM
+    transformer = Transformer.from_crs(
+        crs_from="epsg:4326",  # WGS84
+        crs_to=f"epsg:{32600 + utm_zone if is_northern else 32700 + utm_zone}",
+        always_xy=True
+    )
+
+    utm_x, utm_y = transformer.transform(
+        df_valid['locationLongitude(WGS84)'].values,
+        df_valid['locationLatitude(WGS84)'].values
+    )
+
+    # Get timestamps and compute dt
+    t = df_valid['locationTimestamp_since1970(s)'].values
+    t_rel = t - t[0]
+
+    # Check for valid time differences
+    time_diffs = np.diff(t_rel)
+    if np.any(time_diffs <= 0) or np.median(time_diffs) <= 0:
+        print("⚠️  Invalid timestamp sequence, skipping WGS84 speed derivation")
+        return None
+
+    # Compute velocity using Savitzky-Golay differentiation
+    window = min(51, len(utm_x))
+    if window % 2 == 0:
+        window -= 1
+    window = max(5, window)
+
+    dt = np.median(time_diffs)
+
+    # Ensure dt is valid and not too small
+    if dt <= 0 or np.isnan(dt) or np.isinf(dt):
+        print(f"⚠️  Invalid time delta: {dt}, skipping WGS84 speed derivation")
+        return None
+
+    try:
+        vx = savgol_filter(utm_x, window_length=window, polyorder=3, deriv=1, delta=dt)
+        vy = savgol_filter(utm_y, window_length=window, polyorder=3, deriv=1, delta=dt)
+    except Exception as e:
+        print(f"⚠️  Error computing velocity derivatives: {e}")
+        return None
+
+    # Speed magnitude
+    v_mag = np.sqrt(vx**2 + vy**2)
+
+    # Create result dataframe aligned with original
+    result = pd.DataFrame({
+        'locationTimestamp_since1970(s)': t,
+        'speed_wgs84_derived(m/s)': v_mag
+    })
+
+    return result
+
+
 # ============================================================
 # ----------------------- Plotting ---------------------------
 # ============================================================
 
-def plot_acc_and_speed(df_orig, df_car, out_path, use_imperial_units=False):
-    """Plot vehicle speed and acceleration (metric or imperial)."""
-    
+def plot_acc_and_speed(df_orig, df_car, df_wgs84_speed, out_path, use_imperial_units=False):
+    """Plot vehicle speed and acceleration with GPS vs WGS84-derived speed comparison."""
+
     # --- Conversion constants ---
     MS_TO_MPH = 2.23694     # 1 m/s = 2.23694 mph
     MS2_TO_MPH_PER_S = 2.23694  # 1 m/s² = 2.23694 mph/s (same conversion)
-    
+
     # --- Unit labels ---
     speed_label = "Speed (m/s)"
     acc_label = "Acceleration (m/s²)"
@@ -125,13 +223,22 @@ def plot_acc_and_speed(df_orig, df_car, out_path, use_imperial_units=False):
         print(f"⚠️  No GPS speed found in {out_path}")
         return
 
-    speed = df_orig["locationSpeed(m/s)"].to_numpy(dtype=float)
+    speed_gps = df_orig["locationSpeed(m/s)"].to_numpy(dtype=float)
     t_loc = df_orig["locationTimestamp_since1970(s)"].to_numpy(dtype=float)
     t_loc_rel = t_loc - np.nanmin(t_loc)
 
     # --- Convert speed units ---
     if use_imperial_units:
-        speed *= MS_TO_MPH
+        speed_gps *= MS_TO_MPH
+
+    # --- WGS84-derived speed ---
+    has_wgs84 = df_wgs84_speed is not None
+    if has_wgs84:
+        # Merge WGS84 speed with original dataframe
+        df_merged = df_orig.merge(df_wgs84_speed, on='locationTimestamp_since1970(s)', how='left')
+        speed_wgs84 = df_merged["speed_wgs84_derived(m/s)"].to_numpy(dtype=float)
+        if use_imperial_units:
+            speed_wgs84 *= MS_TO_MPH
 
     # --- Car-frame acceleration ---
     t_acc = df_car["motionTimestamp_sinceReboot(s)"].to_numpy(dtype=float)
@@ -146,28 +253,58 @@ def plot_acc_and_speed(df_orig, df_car, out_path, use_imperial_units=False):
         acc_mag *= MS2_TO_MPH_PER_S
 
     # --- Smooth for better visualization ---
-    speed_s = smooth_signal(speed, window=101)
+    speed_gps_s = smooth_signal(speed_gps, window=101)
+    if has_wgs84:
+        speed_wgs84_s = smooth_signal(speed_wgs84, window=101)
     acc_x_s = smooth_signal(acc_x, window=51)
     acc_mag_s = smooth_signal(acc_mag, window=51)
 
-    # --- Plot ---
-    fig, axs = plt.subplots(2, 1, figsize=(14, 8), sharex=False)
+    # --- Compute validation metrics ---
+    if has_wgs84:
+        valid_mask = ~(np.isnan(speed_gps) | np.isnan(speed_wgs84))
+        if valid_mask.sum() > 0:
+            rmse = np.sqrt(np.mean((speed_gps[valid_mask] - speed_wgs84[valid_mask])**2))
+            correlation = np.corrcoef(speed_gps[valid_mask], speed_wgs84[valid_mask])[0, 1]
+            print(f"📊 Speed Validation Metrics:")
+            print(f"   RMSE: {rmse:.4f} {speed_label.split('(')[1].split(')')[0]}")
+            print(f"   Correlation: {correlation:.4f}")
 
-    axs[0].plot(t_loc_rel, speed, label="Speed (raw)", linewidth=0.8, alpha=0.6)
-    axs[0].plot(t_loc_rel, speed_s, label="Speed (smoothed)", linewidth=1.4)
+    # --- Plot ---
+    fig, axs = plt.subplots(3 if has_wgs84 else 2, 1, figsize=(14, 12 if has_wgs84 else 8), sharex=False)
+
+    # Speed comparison plot
+    axs[0].plot(t_loc_rel, speed_gps, label="GPS-reported (raw)", linewidth=0.8, alpha=0.5, color='blue')
+    axs[0].plot(t_loc_rel, speed_gps_s, label="GPS-reported (smoothed)", linewidth=1.4, color='darkblue')
+    if has_wgs84:
+        axs[0].plot(t_loc_rel, speed_wgs84, label="WGS84-derived (raw)", linewidth=0.8, alpha=0.5, color='orange')
+        axs[0].plot(t_loc_rel, speed_wgs84_s, label="WGS84-derived (smoothed)", linewidth=1.4, color='darkorange')
     axs[0].set_ylabel(speed_label)
-    axs[0].set_title("Vehicle Speed (GPS)")
+    axs[0].set_title("Vehicle Speed: GPS-reported vs WGS84-derived Ground Truth")
     axs[0].legend()
     axs[0].grid(True, linestyle="--", alpha=0.4)
 
-    axs[1].plot(t_acc_rel, acc_x, label="Forward (X) raw", linewidth=0.6, alpha=0.7)
-    axs[1].plot(t_acc_rel, acc_x_s, label="Forward (X) smoothed", linewidth=1.2)
-    axs[1].plot(t_acc_rel, acc_mag_s, label="Total |a|", linestyle="--", alpha=0.8)
-    axs[1].set_xlabel("Time (s) — relative to each sensor start")
-    axs[1].set_ylabel(acc_label)
-    axs[1].set_title("Car-frame Acceleration (from Smartphone Quaternion + Heading)")
-    axs[1].legend()
-    axs[1].grid(True, linestyle="--", alpha=0.4)
+    # Speed difference plot (if WGS84 available)
+    if has_wgs84:
+        speed_diff = speed_gps - speed_wgs84
+        speed_diff_s = smooth_signal(speed_diff, window=101)
+        axs[1].plot(t_loc_rel, speed_diff, label="Difference (raw)", linewidth=0.6, alpha=0.5, color='red')
+        axs[1].plot(t_loc_rel, speed_diff_s, label="Difference (smoothed)", linewidth=1.2, color='darkred')
+        axs[1].axhline(y=0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+        axs[1].set_ylabel(f"Speed Difference {speed_label.split('(')[1]}")
+        axs[1].set_title("Speed Difference: GPS-reported - WGS84-derived")
+        axs[1].legend()
+        axs[1].grid(True, linestyle="--", alpha=0.4)
+
+    # Acceleration plot
+    acc_idx = 2 if has_wgs84 else 1
+    axs[acc_idx].plot(t_acc_rel, acc_x, label="Forward (X) raw", linewidth=0.6, alpha=0.7)
+    axs[acc_idx].plot(t_acc_rel, acc_x_s, label="Forward (X) smoothed", linewidth=1.2)
+    axs[acc_idx].plot(t_acc_rel, acc_mag_s, label="Total |a|", linestyle="--", alpha=0.8)
+    axs[acc_idx].set_xlabel("Time (s) — relative to each sensor start")
+    axs[acc_idx].set_ylabel(acc_label)
+    axs[acc_idx].set_title("Car-frame Acceleration (from Smartphone Quaternion + Heading)")
+    axs[acc_idx].legend()
+    axs[acc_idx].grid(True, linestyle="--", alpha=0.4)
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
@@ -180,16 +317,25 @@ def plot_acc_and_speed(df_orig, df_car, out_path, use_imperial_units=False):
 # ============================================================
 
 def process_all_files(root_folder, save_csv=True, use_imperial_units=False):
-    csv_files = [f for f in os.listdir(root_folder) if f.endswith(".csv")]
+    csv_files = [f for f in os.listdir(root_folder) if f.endswith(".csv") and not f.endswith("_motion_variables.csv")]
     print(f"📁 Found {len(csv_files)} CSV files under {root_folder}")
 
+    csv_files = [csv_files[0]]
+
     for file in csv_files:
+        pdb.set_trace()
         file_path = os.path.join(root_folder, file)
         try:
             df = pd.read_csv(file_path)
+            print(f"\n{'='*60}")
             print(f"Processing {file} ({len(df)} rows) ...")
+            print(f"{'='*60}")
 
+            # --- Compute car-frame acceleration ---
             df_car = compute_car_acceleration(df)
+
+            # --- Compute WGS84-derived speed for ground truth comparison ---
+            df_wgs84_speed = compute_wgs84_derived_speed(df)
 
             # --- Save motion variables CSV ---
             if save_csv:
@@ -197,14 +343,20 @@ def process_all_files(root_folder, save_csv=True, use_imperial_units=False):
                 df_car.to_csv(out_csv, index=False)
                 print(f"💾 Saved car-frame accelerations: {out_csv}")
 
+                # Save WGS84-derived speed if available
+                if df_wgs84_speed is not None:
+                    out_wgs84_csv = file_path.replace(".csv", "_wgs84_speed.csv")
+                    df_wgs84_speed.to_csv(out_wgs84_csv, index=False)
+                    print(f"💾 Saved WGS84-derived speed: {out_wgs84_csv}")
+
             # --- Generate plots ---
             out_png = file_path.replace(".csv", "_motion_variables.png")
-            plot_acc_and_speed(df, df_car, out_png, use_imperial_units=use_imperial_units)
+            plot_acc_and_speed(df, df_car, df_wgs84_speed, out_png, use_imperial_units=use_imperial_units)
 
         except Exception as e:
             print(f"❌ Error processing {file}: {e}")
 
-    print("🏁 All files processed.")
+    print("\n🏁 All files processed.")
 
 
 # ============================================================
@@ -212,9 +364,9 @@ def process_all_files(root_folder, save_csv=True, use_imperial_units=False):
 # ============================================================
 
 if __name__ == "__main__":
-    root_folder = "/home/ubuntu/data/driving_data/EQE_wireless_charging_port/"
+    root_folder = "/home/ubuntu/atai_USAA_DrivingBehaviourAnalysis_project/datasets/atai/data/driving_data/EQE_wireless_charging_port/"
 
     # Set this flag to True for mph & mph/s instead of m/s & m/s²
     use_imperial_units = True
 
-    process_all_files(root_folder, save_csv=False, use_imperial_units=use_imperial_units)
+    process_all_files(root_folder, save_csv=True, use_imperial_units=use_imperial_units)

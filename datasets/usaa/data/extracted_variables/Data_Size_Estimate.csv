@@ -1,0 +1,21 @@
+Unnamed: 0,Unnamed: 1,Unnamed: 2,Unnamed: 3,Unnamed: 4,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,Unnamed: 9,Unnamed: 10
+,,,,,,,,,"Based on DDR Data, Assume:",
+,,,,,,,3.561643836,,1300.0,Trips/Earned Exposure
+,,,,,,,4.452054795,,1000.0,Seconds/Trip
+,,,,,,,,,,(May be too high due to missing first ~quarter mile of trips?)
+,,,,,,,,,,
+,,,,,,,,,For this many Earned Exposures,
+,,,,,1088.0,bytes per second,,,1000000.0,Earned Exposures
+,,,,,,,,,,
+,,,,,149.0,bytes per trip,,,Expect this much data,
+,,,,,,,,,1300000000,Trips
+,,,,,,,,,1300000000000,Seconds
+,,,,,,,,,1286.565475,TB
+,,,,,,,,,,
+,,,,,,,,,With 25% increase for non-driving trips,
+,,,,,,,,,1608.206844,TB
+,,,,,,,,,,
+,,,,,,,,,,
+,,,,,,,,,1088149,Bytes Per Trip
+,,,,,,,,,1062.645508,KB Per Trip
+,,,,,,,,,1.037739754,MB Per Trip
